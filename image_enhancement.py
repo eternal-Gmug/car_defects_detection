@@ -6,10 +6,10 @@ import datetime
 # 构造高斯型高通同态滤波器
 def create_high_pass_filter(size, gammaH, gammaL, c, D0):
     H = np.zeros(size, dtype=np.float32)
-    center = (size[1] // 2, size[0] // 2)
+    center = (size[1] // 2, size[0] // 2)      # 中心坐标
     for u in range(size[0]):
         for v in range(size[1]):
-            D = np.sqrt((u - center[1]) ** 2 + (v - center[0]) ** 2)
+            D = np.sqrt((u - center[1]) ** 2 + (v - center[0]) ** 2)    # 频率点到中心的距离
             H[u, v] = (gammaH - gammaL) * (1.0 - np.exp(-c * (D * D) / (D0 * D0))) + gammaL
     return H
 
@@ -72,53 +72,94 @@ def homomorphic_filter(image, gammaH, gammaL, c, D0):
     
     return img_out
 
-# 主函数
-def main():
-    # 从pictures文件夹中读取图像
-    if not os.path.exists("pictures"):
-        print("pictures文件夹不存在")
-        return -1
-    
-    # 获取pictures文件夹中的所有图片文件
-    image_files = []
-    for file in os.listdir("pictures"):
-        # 简单检查文件扩展名是否为常见图片格式
-        if file.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.gif')):
-            image_files.append(file)
-    
-    # 如果没有找到图片文件
-    if not image_files:
-        print("pictures文件夹中没有图片文件")
-        return -1
-    
-    # 加载第一张图片
-    image_path = os.path.join("pictures", image_files[0])
-    src = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-    
-    if src is None:
-        print(f"无法加载图像: {image_path}")
-        return -1
-    
-    result = None
-    
-    # 检查图像通道数
-    # 这是一张灰度图像
-    if len(src.shape) == 2:
-        # 灰度图像处理
-        result = homomorphic_filter(src, 1.5, 0.5, 1.0, 30.0)
-    elif len(src.shape) == 3 and src.shape[2] == 3:
-        # 彩色图像处理（逐通道）
-        channels = cv2.split(src)
-        result_channels = []
-        
-        for i in range(3):
-            result_channels.append(homomorphic_filter(channels[i], 1.5, 0.5, 1.0, 30.0))
-        
-        result = cv2.merge(result_channels)
+# 计算信息熵
+def calculate_entropy(image):
+    hist = cv2.calcHist([image], [0], None, [256], [0, 256])
+    hist = hist / hist.sum()  # 归一化
+    hist = hist[hist > 0]  # 过滤掉0概率
+    return -np.sum(hist * np.log2(hist))
+
+# 定量评估
+def evaluate_image(original, enhanced, filename):
+    """
+    计算并输出图像的质量评估指标
+
+    参数:
+        original: 原始图像
+        enhanced: 增强后的图像
+        filename: 图像文件名，用于输出到文件
+    """
+
+    # 确保图像是灰度图用于质量评估
+    if len(original.shape) > 2:
+        original_gray = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
     else:
-        print("不支持的图像通道数")
-        return -1
+        original_gray = original.copy()
     
+    if len(enhanced.shape) > 2:
+        enhanced_gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+    else:
+        enhanced_gray = enhanced.copy()
+    
+    # 初始化结果字典
+    results = {
+        'filename': filename,
+        'original_sharpness': 0,
+        'enhanced_sharpness': 0,
+        'original_contrast': 0,
+        'enhanced_contrast': 0,
+        'original_entropy': 0,
+        'enhanced_entropy': 0
+    }
+    
+    try:
+        # 1. 计算清晰度 (拉普拉斯方差)
+        # 值越高表示图像越清晰
+        results['original_sharpness'] = cv2.Laplacian(original_gray, cv2.CV_64F).var()
+        results['enhanced_sharpness'] = cv2.Laplacian(enhanced_gray, cv2.CV_64F).var()
+    except Exception as e:
+        print(f"计算清晰度时出错: {e}")
+    
+    try:
+        # 2. 计算对比度 (标准差)
+        # 值越高表示对比度越强
+        results['original_contrast'] = np.std(original_gray)
+        results['enhanced_contrast'] = np.std(enhanced_gray)
+    except Exception as e:
+        print(f"计算对比度时出错: {e}")
+    
+    try:
+        # 3. 计算熵 (信息熵)
+        # 值越高表示图像信息量越大
+        results['original_entropy'] = calculate_entropy(original_gray)
+        results['enhanced_entropy'] = calculate_entropy(enhanced_gray)
+    except Exception as e:
+        print(f"计算熵时出错: {e}")
+    
+    # 将结果写入文件
+    output_file = 'processed_comparsion.txt'
+    file_exists = os.path.isfile(output_file)
+    
+    with open(output_file, 'a', encoding='utf-8') as f:
+        if not file_exists:
+            # 写入表头
+            f.write("文件名\t原始清晰度\t增强后清晰度\t原始对比度\t增强后对比度\t原始熵\t增强后熵\n")
+        
+        # 写入数据，使用制表符分隔
+        f.write(f"{results['filename']}\t")
+        f.write(f"{results['original_sharpness']:.4f}\t")
+        f.write(f"{results['enhanced_sharpness']:.4f}\t")
+        f.write(f"{results['original_contrast']:.4f}\t")
+        f.write(f"{results['enhanced_contrast']:.4f}\t")
+        f.write(f"{results['original_entropy']:.4f}\t")
+        f.write(f"{results['enhanced_entropy']:.4f}\n")
+    
+    print(f"质量评估结果已保存到 {output_file}")
+    return results
+
+
+# 保存处理前后的图像
+def save_image(src, result, image_path):
     # 创建并排显示的图像
     # 设置缩放比例，缩小图像尺寸
     scale_factor = 0.6  # 可以根据需要调整缩放比例
@@ -188,6 +229,60 @@ def main():
     # 保存图像
     cv2.imwrite(save_path, labeled_image)
     print(f"对比图像已保存至: {save_path}")
+
+# 主函数
+def main():
+    # 从pictures文件夹中读取图像
+    if not os.path.exists("pictures"):
+        print("pictures文件夹不存在")
+        return -1
+    
+    # 获取pictures文件夹中的所有图片文件
+    image_files = []
+    for file in os.listdir("pictures"):
+        # 简单检查文件扩展名是否为常见图片格式
+        if file.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.gif')):
+            image_files.append(file)
+    
+    # 如果没有找到图片文件
+    if not image_files:
+        print("pictures文件夹中没有图片文件")
+        return -1
+    
+    # 加载第一张图片
+    image_path = os.path.join("pictures", image_files[0])
+    image_name = os.path.basename(image_path)
+    src = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+    
+    if src is None:
+        print(f"无法加载图像: {image_path}")
+        return -1
+    
+    result = None
+    
+    # 检查图像通道数
+    # 这是一张灰度图像
+    if len(src.shape) == 2:
+        # 灰度图像处理
+        result = homomorphic_filter(src, 1.5, 0.5, 1.0, 30.0)
+    elif len(src.shape) == 3 and src.shape[2] == 3:
+        # 彩色图像处理（逐通道）
+        channels = cv2.split(src)
+        result_channels = []
+        
+        for i in range(3):
+            result_channels.append(homomorphic_filter(channels[i], 1.5, 0.5, 1.0, 30.0))
+        
+        result = cv2.merge(result_channels)
+    else:
+        print("不支持的图像通道数")
+        return -1
+    
+    # 定量比较处理前后的图片
+    evaluate_image(src, result, image_name)
+
+    # 保存处理前后的图像
+    save_image(src, result, image_path)
     
     # 不需要显示图像，直接销毁所有窗口
     cv2.destroyAllWindows()
