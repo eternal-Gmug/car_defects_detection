@@ -157,7 +157,6 @@ def evaluate_image(original, enhanced, filename):
     print(f"质量评估结果已保存到 {output_file}")
     return results
 
-
 # 保存处理前后的图像
 def save_image(src, result, image_path):
     # 创建并排显示的图像
@@ -182,25 +181,66 @@ def save_image(src, result, image_path):
     src_resized = cv2.resize(src, (unified_w, unified_h))
     result_resized = cv2.resize(result, (unified_w, unified_h))
     
-    # 确保两张图都是彩色图（3通道）
-    if len(src_resized.shape) == 2:
-        src_resized = cv2.cvtColor(src_resized, cv2.COLOR_GRAY2BGR)
-    if len(result_resized.shape) == 2:
-        result_resized = cv2.cvtColor(result_resized, cv2.COLOR_GRAY2BGR)
+    # 检测图像通道数，处理灰度图和彩色图
+    src_channels = 1 if len(src_resized.shape) == 2 else src_resized.shape[2]
+    result_channels = 1 if len(result_resized.shape) == 2 else result_resized.shape[2]
     
+    # 确定最终图像的通道数：如果有一个是4通道，最终就是4通道；否则是3通道
+    final_channels = 4 if (src_channels == 4 or result_channels == 4) else 3
+    
+    # 处理灰度图转换为彩色图
+    # 只对灰度图（单通道）应用颜色空间转换
+    # 对于src_resized
+    if len(src_resized.shape) == 2:  # 灰度图
+        if final_channels == 3:
+            src_resized = cv2.cvtColor(src_resized, cv2.COLOR_GRAY2BGR)
+        else:  # final_channels == 4
+            src_resized = cv2.cvtColor(src_resized, cv2.COLOR_GRAY2BGRA)
+    elif src_channels != final_channels:  # 确保通道数一致
+        if final_channels == 3 and src_channels == 4:
+            src_resized = cv2.cvtColor(src_resized, cv2.COLOR_BGRA2BGR)
+        elif final_channels == 4 and src_channels == 3:
+            src_resized = cv2.cvtColor(src_resized, cv2.COLOR_BGR2BGRA)
+    
+    # 对于result_resized
+    if len(result_resized.shape) == 2:  # 灰度图
+        if final_channels == 3:
+            result_resized = cv2.cvtColor(result_resized, cv2.COLOR_GRAY2BGR)
+        else:  # final_channels == 4
+            result_resized = cv2.cvtColor(result_resized, cv2.COLOR_GRAY2BGRA)
+    elif result_channels != final_channels:  # 确保通道数一致
+        if final_channels == 3 and result_channels == 4:
+            result_resized = cv2.cvtColor(result_resized, cv2.COLOR_BGRA2BGR)
+        elif final_channels == 4 and result_channels == 3:
+            result_resized = cv2.cvtColor(result_resized, cv2.COLOR_BGR2BGRA)
+   
     # 创建新图像，宽度为两个图像宽度之和，高度为统一高度
-    vis = np.zeros((unified_h, unified_w * 2, 3), np.uint8)
+    # 对于四通道图像，使用np.ones而不是np.zeros，以便更好地处理透明度
+    if final_channels == 4:
+        # 对于RGBA图像，创建带透明度的图像，初始设置为完全不透明
+        vis = np.ones((unified_h, unified_w * 2, final_channels), np.uint8) * 255
+        # Alpha通道初始化为不透明
+        vis[:, :, 3] = 255
+    else:
+        # 对于RGB图像，使用黑色背景
+        vis = np.zeros((unified_h, unified_w * 2, final_channels), np.uint8)
     
-    # 将缩放后的图像复制到新图像中
+    # 将缩放后的图像复制到新图像中，包括所有通道
+    # 对于四通道图像，这样会正确复制RGB和Alpha通道
     vis[:, :unified_w] = src_resized
     vis[:, unified_w:unified_w*2] = result_resized
-    
+   
     # 为了解决中文乱码问题，我们可以使用图像拼接的方式添加标签
     # 创建标签区域
     label_height = 40
-    labeled_image = np.ones((unified_h + label_height, unified_w * 2, 3), np.uint8) * 255  # 白色背景
+    # 根据通道数创建带标签的图像
+    labeled_image = np.ones((unified_h + label_height, unified_w * 2, final_channels), np.uint8) * 255  # 白色背景
     
-    # 将图像内容复制到带标签的图像中
+    # 如果是四通道图像，确保Alpha通道为不透明，以便标签清晰可见
+    if final_channels == 4:
+        labeled_image[:, :, 3] = 255
+    
+    # 将图像内容复制到带标签的图像中，保留所有通道信息
     labeled_image[label_height:, :] = vis
     
     # 添加标签（使用ASCII字符作为替代，避免中文乱码）
@@ -274,6 +314,20 @@ def main():
             result_channels.append(homomorphic_filter(channels[i], 1.5, 0.5, 1.0, 30.0))
         
         result = cv2.merge(result_channels)
+    elif len(src.shape) == 3 and src.shape[2] == 4:
+        # RGBA四通道图像处理
+        print("处理RGBA四通道图像...")
+        # 分离RGBA通道
+        r, g, b, a = cv2.split(src)
+        
+        # 对RGB三个通道应用同态滤波
+        r_enhanced = homomorphic_filter(r, 1.5, 0.5, 1.0, 30.0)
+        g_enhanced = homomorphic_filter(g, 1.5, 0.5, 1.0, 30.0)
+        b_enhanced = homomorphic_filter(b, 1.5, 0.5, 1.0, 30.0)
+        
+        # 保留原始Alpha通道
+        # 合并增强后的RGB通道和原始Alpha通道
+        result = cv2.merge([r_enhanced, g_enhanced, b_enhanced, a])
     else:
         print("不支持的图像通道数")
         return -1
