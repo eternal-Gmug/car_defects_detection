@@ -1,7 +1,12 @@
 import cv2
 import numpy as np
 import os
+import time
 import datetime
+from PIL import Image, ImageOps
+from skimage.metrics import structural_similarity as ssim
+import histogram_equalization as heq
+import albumentations as A
 
 # 构造高斯型高通同态滤波器
 def create_high_pass_filter(size, gammaH, gammaL, c, D0):
@@ -15,18 +20,26 @@ def create_high_pass_filter(size, gammaH, gammaL, c, D0):
 
 # 单通道同态滤波
 def homomorphic_filter(image, gammaH, gammaL, c, D0):
+    ### @return arr : 返回的是同态滤波后的图像数组，格式是np.array(np.uint8)
+
+    # 将PIL Image对象转换为NumPy数组
+    if hasattr(image, 'mode'):
+        img_array = np.array(image)
+    else:
+        img_array = image
+    
     # 转换为float32类型，方便后续计算
-    float_img = image.astype(np.float32)
+    float_img = img_array.astype(np.float32)
     # 防止log(0)出现无穷大
     float_img += 1
     # 对图像取对数：ln(f(x, y))
     log_float_img = np.log(float_img)
     
     # 对图像扩展到最佳DFT尺寸
-    m = cv2.getOptimalDFTSize(image.shape[0])
-    n = cv2.getOptimalDFTSize(image.shape[1])
+    m = cv2.getOptimalDFTSize(img_array.shape[0])
+    n = cv2.getOptimalDFTSize(img_array.shape[1])
     # 填充图像
-    padded = np.pad(log_float_img, ((0, m - image.shape[0]), (0, n - image.shape[1])), 
+    padded = np.pad(log_float_img, ((0, m - img_array.shape[0]), (0, n - img_array.shape[1])), 
                     mode='constant', constant_values=0)
     
     # 创建复数矩阵，实部为padded，虚部为0
@@ -57,7 +70,7 @@ def homomorphic_filter(image, gammaH, gammaL, c, D0):
     
     # 提取实部，去掉填充部分
     planes = cv2.split(complexI)
-    realI = planes[0][:image.shape[0], :image.shape[1]]
+    realI = planes[0][:img_array.shape[0], :img_array.shape[1]]
     
     # 归一化到[0, 10]，避免指数溢出
     cv2.normalize(realI, realI, 0, 10, cv2.NORM_MINMAX)
@@ -79,27 +92,132 @@ def calculate_entropy(image):
     hist = hist[hist > 0]  # 过滤掉0概率
     return -np.sum(hist * np.log2(hist))
 
+# 计算局部对比度图
+def local_contrast_map(image, kernel_size=15):
+    """计算局部对比度图"""
+    # 将PIL Image对象转换为NumPy数组
+    img_array = None
+    if hasattr(image, 'mode'):
+        img_array = np.array(image)
+    else:
+        img_array = image
+    
+    # 确保img_array已正确定义
+    if img_array is None:
+        raise ValueError("无法将图像转换为NumPy数组")
+    
+    # 确保处理的是NumPy数组
+    if len(img_array.shape) == 3:
+        # 对于PIL读取的图像（RGB顺序），需要转换为BGR才能正确使用cv2.cvtColor
+        if img_array.shape[2] == 3:
+            # 检查是否需要颜色空间转换（PIL是RGB，OpenCV是BGR）
+            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+        elif img_array.shape[2] == 4:
+            # 对于RGBA图像，转换为灰度
+            gray = cv2.cvtColor(img_array, cv2.COLOR_RGBA2GRAY)
+        else:
+            gray = img_array[:,:,0]  # 取第一个通道作为灰度
+    else:
+        gray = img_array
+    
+    # 使用局部标准差作为对比度度量
+    # 局部区域E[X^2]
+    local_contrast = cv2.blur(gray**2, (kernel_size, kernel_size))
+    # 局部区域E[X]
+    local_mean = cv2.blur(gray, (kernel_size, kernel_size))
+    # 计算局部区域标准差Var[X] = E[X^2] - (E[X])^2
+    local_std = np.sqrt(local_contrast - local_mean**2)
+    
+    return local_std
+
+# 多尺度的局部对比度
+def multiscale_contrast_analysis(image, scales=[5, 15, 25]):
+    """
+    多尺度对比度分析
+    适用于检测不同大小的漆面缺陷
+    """
+    # 将PIL Image对象转换为NumPy数组
+    img_array = None
+    if hasattr(image, 'mode'):
+        img_array = np.array(image)
+    else:
+        img_array = image
+    
+    # 确保img_array已正确定义
+    if img_array is None:
+        raise ValueError("无法将图像转换为NumPy数组")
+    
+    # 确保处理的是NumPy数组
+    if len(img_array.shape) == 3:
+        # 对于PIL读取的图像（RGB顺序），需要转换为BGR才能正确使用cv2.cvtColor
+        if img_array.shape[2] == 3:
+            # 检查是否需要颜色空间转换（PIL是RGB，OpenCV是BGR）
+            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+        elif img_array.shape[2] == 4:
+            # 对于RGBA图像，转换为灰度
+            gray = cv2.cvtColor(img_array, cv2.COLOR_RGBA2GRAY)
+        else:
+            gray = img_array[:,:,0]  # 取第一个通道作为灰度
+    else:
+        gray = img_array
+    
+    contrast_results = {}
+    
+    for scale in scales:
+        local_std = local_contrast_map(gray, scale)
+        contrast_results[f'scale_{scale}'] = {
+            'mean_contrast': np.mean(local_std),
+            'max_contrast': np.max(local_std),
+            'contrast_map': local_std
+        }
+    
+    return contrast_results
+
 # 定量评估
 def evaluate_image(original, enhanced, filename):
     """
     计算并输出图像的质量评估指标
 
     参数:
-        original: 原始图像
-        enhanced: 增强后的图像
+        original: 原始图像(PIL Image)
+        enhanced: 增强后的图像(PIL Image)
         filename: 图像文件名，用于输出到文件
     """
 
-    # 确保图像是灰度图用于质量评估
-    if len(original.shape) > 2:
-        original_gray = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
+    # 将PIL Image对象转换为NumPy数组
+    if hasattr(original, 'mode'):
+        original_array = np.array(original)
+        # PIL读取的图像是RGB/RGBA顺序，需要转换为BGR/BGRA才能与OpenCV兼容
+        if len(original_array.shape) == 3:
+            if original_array.shape[2] == 3:
+                original_array = cv2.cvtColor(original_array, cv2.COLOR_RGB2BGR)
+            elif original_array.shape[2] == 4:
+                original_array = cv2.cvtColor(original_array, cv2.COLOR_RGBA2BGRA)
     else:
-        original_gray = original.copy()
+        original_array = original
     
-    if len(enhanced.shape) > 2:
-        enhanced_gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+    # 对enhanced做同样的处理
+    if hasattr(enhanced, 'mode'):
+        enhanced_array = np.array(enhanced)
+        # PIL读取的图像是RGB/RGBA顺序，需要转换为BGR/BGRA才能与OpenCV兼容
+        if len(enhanced_array.shape) == 3:
+            if enhanced_array.shape[2] == 3:
+                enhanced_array = cv2.cvtColor(enhanced_array, cv2.COLOR_RGB2BGR)
+            elif enhanced_array.shape[2] == 4:
+                enhanced_array = cv2.cvtColor(enhanced_array, cv2.COLOR_RGBA2BGRA)
     else:
-        enhanced_gray = enhanced.copy()
+        enhanced_array = enhanced
+
+    # 确保图像是灰度图用于质量评估
+    if len(original_array.shape) > 2:
+        original_gray = cv2.cvtColor(original_array, cv2.COLOR_BGR2GRAY)
+    else:
+        original_gray = original_array.copy()
+    
+    if len(enhanced_array.shape) > 2:
+        enhanced_gray = cv2.cvtColor(enhanced_array, cv2.COLOR_BGR2GRAY)
+    else:
+        enhanced_gray = enhanced_array.copy()
     
     # 初始化结果字典
     results = {
@@ -109,7 +227,9 @@ def evaluate_image(original, enhanced, filename):
         'original_contrast': 0,
         'enhanced_contrast': 0,
         'original_entropy': 0,
-        'enhanced_entropy': 0
+        'enhanced_entropy': 0,
+        'psnr': 0,  # 峰值信噪比
+        'ssim': 0   # 结构相似性指数
     }
     
     try:
@@ -121,10 +241,28 @@ def evaluate_image(original, enhanced, filename):
         print(f"计算清晰度时出错: {e}")
     
     try:
-        # 2. 计算对比度 (标准差)
-        # 值越高表示对比度越强
-        results['original_contrast'] = np.std(original_gray)
-        results['enhanced_contrast'] = np.std(enhanced_gray)
+        # results['original_contrast'] = np.std(original_gray)
+        # results['enhanced_contrast'] = np.std(enhanced_gray)
+        '''
+        # 2. 计算对比度 (Michelson对比度)
+        # 值范围为[0,1]，值越高表示对比度越强
+        # Michelson对比度公式: (I_max - I_min) / (I_max + I_min)
+        # 处理原始图像
+        original_max = np.max(original_gray)
+        original_min = np.min(original_gray)
+        # 避免除以零
+        denominator = original_max + original_min
+        results['original_contrast'] = (original_max - original_min) / denominator if denominator != 0 else 0
+        
+        # 处理增强后的图像
+        enhanced_max = np.max(enhanced_gray)
+        enhanced_min = np.min(enhanced_gray)
+        # 避免除以零
+        denominator = enhanced_max + enhanced_min
+        results['enhanced_contrast'] = (enhanced_max - enhanced_min) / denominator if denominator != 0 else 0
+        '''
+        results['original_contrast'] = np.mean(local_contrast_map(original_gray))
+        results['enhanced_contrast'] = np.mean(local_contrast_map(enhanced_gray))
     except Exception as e:
         print(f"计算对比度时出错: {e}")
     
@@ -136,6 +274,41 @@ def evaluate_image(original, enhanced, filename):
     except Exception as e:
         print(f"计算熵时出错: {e}")
     
+    try:
+        # 4. 计算峰值信噪比(PSNR)
+        # 值越高表示图像质量越好，通常在20-50dB之间
+        # 确保两个图像的尺寸相同
+        if original_gray.shape == enhanced_gray.shape:
+            # 对于8位图像，最大值为255
+            max_pixel = 255.0
+            results['psnr'] = cv2.PSNR(original_gray, enhanced_gray, max_pixel)
+        else:
+            print("计算PSNR时出错: 原始图像和增强图像尺寸不匹配")
+    except Exception as e:
+        print(f"计算PSNR时出错: {e}")
+    
+    try:
+        # 5. 计算结构相似性指数(SSIM)
+        # 值范围为[-1,1]，值越接近1表示结构相似性越好
+        # 确保两个图像的尺寸相同
+        if original_gray.shape == enhanced_gray.shape:
+            # 使用OpenCV的SSIM计算，winSize设置为11，sigma设置为1.5
+            # 确保只提取返回值的第一个元素
+            ssim_result, _ = cv2.quality.QualitySSIM_compute(original_gray, enhanced_gray, (11, 11))
+            results['ssim'] = ssim_result[0]
+        else:
+            print("计算SSIM时出错: 原始图像和增强图像尺寸不匹配")
+    except Exception as e:
+        # 如果OpenCV版本较旧，尝试使用另一种方式计算SSIM
+        try:
+            if original_gray.shape == enhanced_gray.shape:
+                ssim_result = ssim(original_gray, enhanced_gray)
+                results['ssim'] = ssim_result
+            else:
+                print("计算SSIM时出错: 原始图像和增强图像尺寸不匹配")
+        except Exception as inner_e:
+            print(f"计算SSIM时出错: {inner_e}")
+    
     # 将结果写入文件
     output_file = 'processed_comparsion.txt'
     file_exists = os.path.isfile(output_file)
@@ -143,7 +316,7 @@ def evaluate_image(original, enhanced, filename):
     with open(output_file, 'a', encoding='utf-8') as f:
         if not file_exists:
             # 写入表头
-            f.write("文件名\t原始清晰度\t增强后清晰度\t原始对比度\t增强后对比度\t原始熵\t增强后熵\n")
+            f.write("文件名\t原始清晰度\t增强后清晰度\t原始局部15对比度\t增强后局部15对比度\t原始熵\t增强后熵\t峰值信噪比(PSNR)\t结构相似性(SSIM)\n")
         
         # 写入数据，使用制表符分隔
         f.write(f"{results['filename']}\t")
@@ -152,7 +325,9 @@ def evaluate_image(original, enhanced, filename):
         f.write(f"{results['original_contrast']:.4f}\t")
         f.write(f"{results['enhanced_contrast']:.4f}\t")
         f.write(f"{results['original_entropy']:.4f}\t")
-        f.write(f"{results['enhanced_entropy']:.4f}\n")
+        f.write(f"{results['enhanced_entropy']:.4f}\t")
+        f.write(f"{results['psnr']:.4f}\t")
+        f.write(f"{results['ssim']:.4f}\n")
     
     print(f"质量评估结果已保存到 {output_file}")
     return results
@@ -163,13 +338,37 @@ def save_image(src, result, image_path):
     # 设置缩放比例，缩小图像尺寸
     scale_factor = 0.6  # 可以根据需要调整缩放比例
     
+    # 将PIL Image对象转换为NumPy数组
+    if hasattr(src, 'mode'):
+        src_array = np.array(src)
+        # PIL读取的图像是RGB/RGBA顺序，需要转换为BGR/BGRA才能与OpenCV兼容
+        if len(src_array.shape) == 3:
+            if src_array.shape[2] == 3:
+                src_array = cv2.cvtColor(src_array, cv2.COLOR_RGB2BGR)
+            elif src_array.shape[2] == 4:
+                src_array = cv2.cvtColor(src_array, cv2.COLOR_RGBA2BGRA)
+    else:
+        src_array = src
+    
+    # 对result做同样的处理
+    if hasattr(result, 'mode'):
+        result_array = np.array(result)
+        # PIL读取的图像是RGB/RGBA顺序，需要转换为BGR/BGRA才能与OpenCV兼容
+        if len(result_array.shape) == 3:
+            if result_array.shape[2] == 3:
+                result_array = cv2.cvtColor(result_array, cv2.COLOR_RGB2BGR)
+            elif result_array.shape[2] == 4:
+                result_array = cv2.cvtColor(result_array, cv2.COLOR_RGBA2BGRA)
+    else:
+        result_array = result
+    
     # 获取原始图像尺寸并缩小
-    h1, w1 = src.shape[:2]
+    h1, w1 = src_array.shape[:2]
     new_w1 = int(w1 * scale_factor)
     new_h1 = int(h1 * scale_factor)
     
     # 获取处理后图像尺寸并缩小（保持相同的缩放比例）
-    h2, w2 = result.shape[:2]
+    h2, w2 = result_array.shape[:2]
     new_w2 = int(w2 * scale_factor)
     new_h2 = int(h2 * scale_factor)
     
@@ -178,8 +377,8 @@ def save_image(src, result, image_path):
     unified_h = min(new_h1, new_h2)
     
     # 缩放图像
-    src_resized = cv2.resize(src, (unified_w, unified_h))
-    result_resized = cv2.resize(result, (unified_w, unified_h))
+    src_resized = cv2.resize(src_array, (unified_w, unified_h))
+    result_resized = cv2.resize(result_array, (unified_w, unified_h))
     
     # 检测图像通道数，处理灰度图和彩色图
     src_channels = 1 if len(src_resized.shape) == 2 else src_resized.shape[2]
@@ -290,56 +489,114 @@ def main():
         return -1
     
     # 加载第一张图片
-    image_path = os.path.join("pictures", image_files[0])
+    image_path = os.path.join("pictures", image_files[6])
     image_name = os.path.basename(image_path)
-    src = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+    # src = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+    # 使用PIL对象打开图像，目的为了与后面的直方图均衡化相对应
+    src = Image.open(image_path)
     
     if src is None:
         print(f"无法加载图像: {image_path}")
         return -1
     
-    result = None
+    homo_result = None
+    CLAHE_result_1 = None   # 使用albumentations的CLAHE
+    CLAHE_result_2 = None   # 自主实现的CLAHE
+    HeQ = heq.ImageContraster()
+    img_array = np.array(src)
+    
+    # 创建albumentations的CLAHE变换
+    # clip_limit控制对比度限制，tile_grid_size控制图像分块大小
+    clahe_transform = A.CLAHE(clip_limit=2.0, tile_grid_size=(8, 8))
     
     # 检查图像通道数
-    # 这是一张灰度图像
-    if len(src.shape) == 2:
+    if len(img_array.shape) == 2:
         # 灰度图像处理
-        result = homomorphic_filter(src, 1.5, 0.5, 1.0, 30.0)
-    elif len(src.shape) == 3 and src.shape[2] == 3:
+        homo_result = homomorphic_filter(img_array, 1.5, 0.5, 1.0, 30.0)
+        # 对于灰度图，需要扩展为3通道以便albumentations处理
+        img_3channel = np.expand_dims(img_array, axis=-1)
+        img_3channel = np.repeat(img_3channel, 3, axis=-1)
+        # 应用CLAHE
+        result = clahe_transform(image=img_3channel)
+        # 转回灰度图
+        CLAHE_result_1 = result['image'][:,:,0]
+        # 自主实现的CLAHE
+        CLAHE_result_2 = HeQ.enhance_contrast(img_array, method='CLAHE')
+    elif len(img_array.shape) == 3 and img_array.shape[2] == 3:
         # 彩色图像处理（逐通道）
-        channels = cv2.split(src)
-        result_channels = []
-        
-        for i in range(3):
-            result_channels.append(homomorphic_filter(channels[i], 1.5, 0.5, 1.0, 30.0))
-        
-        result = cv2.merge(result_channels)
-    elif len(src.shape) == 3 and src.shape[2] == 4:
+        # PIL读取的是RGB，需要转换为BGR供OpenCV使用
+        img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        # 使用OpenCV的split方法分离通道
+        b, g, r = cv2.split(img_bgr)
+        # 对每个通道应用同态滤波
+        result_b = homomorphic_filter(b, 1.5, 0.5, 1.0, 30.0)
+        result_g = homomorphic_filter(g, 1.5, 0.5, 1.0, 30.0)
+        result_r = homomorphic_filter(r, 1.5, 0.5, 1.0, 30.0)
+        # 合并通道
+        homo_result = cv2.merge([result_b, result_g, result_r])
+        # 应用albumentations的CLAHE到RGB图像
+        result = clahe_transform(image=img_array)
+        CLAHE_result_1 = result['image']
+        # 自主实现的CLAHE
+        CLAHE_result_2 = HeQ.enhance_contrast(img_array, method='CLAHE')
+    elif len(img_array.shape) == 3 and img_array.shape[2] == 4:
         # RGBA四通道图像处理
         print("处理RGBA四通道图像...")
-        # 分离RGBA通道
-        r, g, b, a = cv2.split(src)
+        # 分离RGB和Alpha通道
+        img_rgb = img_array[:,:,:3]
+        alpha = img_array[:,:,3]
         
-        # 对RGB三个通道应用同态滤波
-        r_enhanced = homomorphic_filter(r, 1.5, 0.5, 1.0, 30.0)
-        g_enhanced = homomorphic_filter(g, 1.5, 0.5, 1.0, 30.0)
+        # 对RGB通道应用同态滤波
+        # 先转换为BGR
+        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+        b, g, r = cv2.split(img_bgr)
         b_enhanced = homomorphic_filter(b, 1.5, 0.5, 1.0, 30.0)
+        g_enhanced = homomorphic_filter(g, 1.5, 0.5, 1.0, 30.0)
+        r_enhanced = homomorphic_filter(r, 1.5, 0.5, 1.0, 30.0)
         
-        # 保留原始Alpha通道
-        # 合并增强后的RGB通道和原始Alpha通道
-        result = cv2.merge([r_enhanced, g_enhanced, b_enhanced, a])
+        # 合并通道
+        homo_result_rgb = cv2.merge([b_enhanced, g_enhanced, r_enhanced])
+        # 转回RGB并添加Alpha通道
+        homo_result_rgb_rgb = cv2.cvtColor(homo_result_rgb, cv2.COLOR_BGR2RGB)
+        homo_result = np.dstack((homo_result_rgb_rgb, alpha))
+        
+        # 应用albumentations的CLAHE到RGB部分
+        result = clahe_transform(image=img_rgb)
+        clahe_rgb = result['image']
+        # 添加回Alpha通道
+        CLAHE_result_1 = np.dstack((clahe_rgb, alpha))
+        # 自主实现的CLAHE
+        CLAHE_result_2 = HeQ.enhance_contrast(img_array, method='CLAHE')
     else:
         print("不支持的图像通道数")
         return -1
     
-    # 定量比较处理前后的图片
-    evaluate_image(src, result, image_name)
+    if homo_result is not None:
+        # 将OpenCV的结果转换为PIL Image对象
+        homo_result = cv2.cvtColor(homo_result, cv2.COLOR_BGR2RGB)
+        homo_result = Image.fromarray(homo_result)
+    
+    if CLAHE_result_1 is not None:
+        # 将OpenCV的结果转换为PIL Image对象
+        # CLAHE_result_1 = cv2.cvtColor(CLAHE_result_1, cv2.COLOR_BGR2RGB)
+        CLAHE_result_1 = Image.fromarray(CLAHE_result_1)
+    
+    # 评估图像质量
+    evaluate_image(src, homo_result, image_name)
+    evaluate_image(src, CLAHE_result_1, image_name)
+    evaluate_image(src, CLAHE_result_2, image_name)
 
     # 保存处理前后的图像
-    save_image(src, result, image_path)
+    save_image(src, homo_result, image_path)
+    # 间隔1秒
+    time.sleep(1)
+    save_image(src, CLAHE_result_1, image_path)
+    # 间隔1秒
+    time.sleep(1)
+    save_image(src, CLAHE_result_2, image_path)
     
     # 不需要显示图像，直接销毁所有窗口
-    cv2.destroyAllWindows()
+    # cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
