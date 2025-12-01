@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 4
+names: ['dirt', 'runs', 'scratch', 'water marks']
+
+roboflow:
+  workspace: poli-h7nww
+  project: final-year-car-paint-defect
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/poli-h7nww/final-year-car-paint-defect/dataset/1
