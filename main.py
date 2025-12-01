@@ -28,7 +28,7 @@ def main():
         return -1
     
     # 加载第一张图片
-    image_path = os.path.join("pictures", image_files[7])
+    image_path = os.path.join("pictures", image_files[6])
     image_name = os.path.basename(image_path)
     # src = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
     # 使用PIL对象打开图像，目的为了与后面的直方图均衡化相对应
@@ -119,14 +119,14 @@ def main():
     
     # 评估图像质量
     # ie.evaluate_image(src, homo_result, image_name)
-    ie.evaluate_image(src, CLAHE_result_1, image_name)
+    # ie.evaluate_image(src, CLAHE_result_1, image_name)
     # ie.evaluate_image(src, CLAHE_result_2, image_name)
 
     # 保存处理前后的图像
     # ie.save_image(src, homo_result, image_path)
     # 间隔1秒
     # time.sleep(1)
-    ie.save_image(src, CLAHE_result_1, image_path)
+    # ie.save_image(src, CLAHE_result_1, image_path)
     # 间隔1秒
     # time.sleep(1)
     # ie.save_image(src, CLAHE_result_2, image_path)
