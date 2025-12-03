@@ -1,0 +1,12 @@
+Training DataSet Accuracy: 0.9932
+classification_report:
+              precision    recall  f1-score   support
+
+           0       1.00      0.99      0.99       437
+           1       1.00      0.99      1.00       110
+           2       1.00      1.00      1.00       225
+           3       0.98      1.00      0.99       260
+
+    accuracy                           0.99      1032
+   macro avg       0.99      0.99      0.99      1032
+weighted avg       0.99      0.99      0.99      1032

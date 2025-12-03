@@ -1,13 +1,15 @@
 import cv2
-from cv2.gapi import mask
 import numpy as np
 import os
 import time
 import yaml
+import general_function as gf
 from PIL import Image
 from pathlib import Path
 from ultralytics import YOLO
+from tqdm import tqdm
 
+########################### 传统分割模块 ###################################
 # 保存二值图像（作为中间产物）
 def save_binary_image(binary_img, image_name):
     """
@@ -197,40 +199,14 @@ def traditional_segmentation(image, image_name):
     save_segmentation_image(image_with_contours, image_name)
     return image_with_contours
     '''
-    
-# 使用yolov8n-seg.pt分割模型进行训练
 
-# 验证数据集的yaml文件是否正确
-def validate_data_yaml(data_yaml_path):
-    """
-    验证数据集的yaml文件是否正确
-    """
-    try:
-        with open(data_yaml_path, 'r') as file:
-            data = yaml.safe_load(file)
-        
-        for key in ['train', 'val']:
-            if key in data:
-                img_path = Path(data[key])
-                if img_path.exists():
-                    img_count = len(list(img_path.glob('*.jpg'))) + len(list(img_path.glob('*.png')))
-                    print(f"  {key}图像数: {img_count}")
-                    # 检查对应的labels目录
-                    labels_dir = str(img_path).replace('images', 'labels')
-                    if os.path.exists(labels_dir):
-                        label_count = len(list(Path(labels_dir).glob('*.txt')))
-                        print(f"  {key}标签数: {label_count}")
-                    else:
-                        print(f"  ⚠️ 警告: {labels_dir} 不存在!")
-                else:
-                    print(f"  ⚠️ 警告: {img_path} 不存在!")
-    except Exception as e:
-        print(f"数据集yaml文件验证失败: {e}")
-
+########################### 模型训练模块 ###################################
+# 处理原始标签文件（一次性函数，用于将多边形标签格式和标注框标签格式的混合格式文件夹分成两个文件夹）
 def process_labels_for_segmentation(data_yaml_path):
     """
-    预处理标签文件,将多边形标注转换为YOLOv8分割任务要求的格式。
-    转换格式：`class_id x_center y_center width height poly_x1 poly_y1 ... poly_xn poly_yn`
+    预处理标签文件,将多边形标签格式和标注框标签格式分成两个文件夹。
+    多边形标签格式：`class_id poly_x1 poly_y1 ... poly_xn poly_yn`
+    标注框标签格式：`class_id x_center y_center width height`
     
     参数:
         data_yaml_path: data.yaml文件路径
@@ -241,11 +217,14 @@ def process_labels_for_segmentation(data_yaml_path):
         
         data_root = os.path.dirname(data_yaml_path)
         
-        for split in ['train', 'val']:
+        for split in ['train', 'val', 'test']:
             if split in data:
                 img_rel_path = data[split]
                 labels_rel_path = img_rel_path.replace('images', 'labels')
                 labels_dir = os.path.join(data_root, labels_rel_path)
+                # 创建一个灰尘水渍的新标签文件夹
+                labels_det_dir = os.path.join(data_root, labels_rel_path.replace('labels', 'labels_det'))
+                os.makedirs(labels_det_dir, exist_ok=True)
                 
                 if os.path.exists(labels_dir):
                     print(f"\n正在处理 {split} 集标签目录: {labels_dir}")
@@ -256,79 +235,73 @@ def process_labels_for_segmentation(data_yaml_path):
                     
                     for label_file in label_files:
                         try:
+                            # 创建一个新的标注框txt标签文件，如果不存在则创建
+                            label_det_file = os.path.join(labels_det_dir, label_file.name)
+                            os.makedirs(os.path.dirname(label_det_file), exist_ok=True)
+                            
+                            # 确保无论如何都创建标签文件（包括空文件）
+                            with open(label_det_file, 'w') as f:
+                                pass  # 创建空文件
+
                             with open(label_file, 'r') as f:
                                 lines = f.readlines()
                             
                             if not lines:
                                 # 如果是空文件（代表无目标的图像），直接跳过或保留空文件
+                                processed_count += 1
                                 continue
                             
                             new_lines = []
+                            det_lines = []  # 存储检测格式的标签行
+                            
                             for line in lines:
                                 line = line.strip()
                                 if not line:
+                                    # 如果是空行，直接跳过
                                     continue
                                 
                                 parts = list(map(float, line.split()))
-                                class_id = int(parts[0])
                                 polygon_coords = parts[1:]
                                 
-                                # 1. 基本检查
-                                if len(polygon_coords) < 6:  # 至少需要3个点（6个坐标）才能构成多边形
-                                    print(f"  ⚠️ 跳过：多边形坐标点不足（至少需3个点） @ {label_file.name}: {line}")
-                                    error_count += 1
+                                # 基本检查
+                                if len(polygon_coords) == 4:  # 这说明是一个标注框的yolo格式
+                                    print(f"  ⚠️ 这是标注框格式: 抛给新标签文件 @ {label_file.name}: {line}")
+                                    # 添加到检测标签行列表
+                                    det_lines.append(line)
+                                    processed_count += 1
                                     continue
                                 if len(polygon_coords) % 2 != 0:
-                                    print(f"  ⚠️ 跳过：坐标数量不是偶数 @ {label_file.name}")
+                                    print(f"  ⚠️ 跳过: 这是真的错误,坐标数量不是偶数 @ {label_file.name}")
+                                    processed_count += 1
                                     error_count += 1
                                     continue
                                 
-                                # 2. 提取所有x和y坐标
-                                xs = polygon_coords[0::2]  # 所有x坐标
-                                ys = polygon_coords[1::2]  # 所有y坐标
-                                
-                                # 3. 计算最小外接矩形（边界框）
-                                x_min, x_max = min(xs), max(xs)
-                                y_min, y_max = min(ys), max(ys)
-                                
-                                # 4. 计算YOLO格式的边界框 (x_center, y_center, width, height)
-                                x_center = (x_min + x_max) / 2.0
-                                y_center = (y_min + y_max) / 2.0
-                                width = x_max - x_min
-                                height = y_max - y_min
-                                
-                                # 5. 构建新的标签行：类别 + 边界框 + 原始多边形
-                                new_line_parts = [str(class_id), 
-                                                  f"{x_center:.6f}", f"{y_center:.6f}", 
-                                                  f"{width:.6f}", f"{height:.6f}"]
-                                # 添加多边形坐标，保留原始精度或适当格式化
-                                new_line_parts.extend([f"{coord:.6f}" for coord in polygon_coords])
-                                
-                                new_lines.append(' '.join(new_line_parts))
-                            
-                            # 6. 将转换后的内容写回文件
-                            if new_lines:
-                                with open(label_file, 'w') as f:
-                                    f.write('\n'.join(new_lines))
+                                # 正常多边形加入新列表
+                                new_lines.append(line)
                                 processed_count += 1
-                            else:
-                                # 如果文件内所有行都被跳过，写入一个空文件（表示无目标）
-                                with open(label_file, 'w') as f:
-                                    pass  # 创建空文件
                                 
+                            # 将新列表写入原始标签文件
+                            with open(label_file, 'w') as f:
+                                if new_lines:  # 只有当有内容时才写入，避免末尾的空行
+                                    f.write('\n'.join(new_lines) + '\n')
+                            
+                            # 将检测格式标签行写入检测标签文件
+                            with open(label_det_file, 'w') as f:
+                                if det_lines:  # 只有当有内容时才写入，避免末尾的空行
+                                    f.write('\n'.join(det_lines) + '\n')
+
                         except Exception as e:
-                            print(f"  ❌ 处理文件 {label_file.name} 时出错: {e}")
+                            print(f" 处理文件 {label_file.name} 时出错: {e}")
+                            processed_count += 1
                             error_count += 1
-                    
-                    print(f"    完成！成功处理 {processed_count} 个文件，{error_count} 个错误。")
-                    
+                            
+                    print(f" 完成！成功处理 {processed_count} 个文件，{error_count} 个错误。")          
                 else:
-                    print(f"  ⚠️ 警告: 标签目录不存在 {labels_dir}")
-        
+                    print(f" 警告: 标签目录不存在 {labels_dir}")
     except Exception as e:
         print(f"预处理标签文件失败: {e}")
 
-# 评估yolov8n-seg.pt模型
+# 整体评估yolov8n-seg.pt模型
 def evaluate_model(model, data_yaml_path, split='val'):
     """
     在验证集上评估模型并计算IoU指标
@@ -353,24 +326,43 @@ def evaluate_model(model, data_yaml_path, split='val'):
     
     # 打印分割任务的关键指标
     print("\n整体评估结果:")
-    print(f"  精确度 (Precision): {metrics.box.p:.4f}")
-    print(f"  召回率 (Recall): {metrics.box.r:.4f}")
-    print(f"  mAP@0.5: {metrics.box.map50:.4f}")       # 衡量了预测边界框与真实边界框重叠度达到50%以上的平均检测准确率
-    print(f"  mAP@0.5:0.95: {metrics.box.map:.4f}")    # 计算IoU阈值从0.5到0.95，以0.05为步长（共10个阈值：0.5, 0.55, 0.6, ..., 0.95）的mAP平均值
-    # 给出模型在验证集上的损失
-    print(f"  验证集损失: {metrics.loss:.4f}")
-    # 给出模型在验证集上的平均IoU
-    print(f"  验证集平均IoU: {metrics.box.iou:.4f}")
+    # 获取并打印指标
+    try:
+        # 获取box指标
+        precision = metrics.box.mp if hasattr(metrics.box, 'mp') else 0
+        recall = metrics.box.mr if hasattr(metrics.box, 'mr') else 0
+        map50 = metrics.box.map50 if hasattr(metrics.box, 'map50') else 0
+        map_all = metrics.box.map if hasattr(metrics.box, 'map') else 0
+        
+        # 获取seg指标
+        seg_map50 = metrics.seg.map50 if hasattr(metrics.seg, 'map50') else 0
+        seg_map = metrics.seg.map if hasattr(metrics.seg, 'map') else 0
+        
+        # 获取损失
+        loss = metrics.loss if hasattr(metrics, 'loss') else 0
+        
+        print(f"  精确度 (Precision): {precision:.4f}")
+        print(f"  召回率 (Recall): {recall:.4f}")
+        print(f"  mAP@0.5: {map50:.4f}")
+        print(f"  mAP@0.5:0.95: {map_all:.4f}")
+        print(f"  验证集损失: {loss:.4f}")
+        print(f"  分割任务mAP@0.5: {seg_map50:.4f}")
+        print(f"  分割任务mAP@0.5:0.95: {seg_map:.4f}")
+        
+    except Exception as e:
+        print(f"访问指标时出错: {e}")
+        import traceback
+        traceback.print_exc()
     
-    # 保存整体评估结果到文件
-    with open('yolov8_segmentation_metrics.txt', 'w') as f:
-        f.write(f"精确度 (Precision): {metrics.box.p:.4f}\n")
-        f.write(f"召回率 (Recall): {metrics.box.r:.4f}\n")
-        f.write(f"mAP@0.5: {metrics.box.map50:.4f}\n")
-        f.write(f"mAP@0.5:0.95: {metrics.box.map:.4f}\n")
-        f.write(f"验证集损失: {metrics.loss:.4f}\n")
-        f.write(f"验证集平均IoU: {metrics.box.iou:.4f}\n")
-        f.write(f"\n每张图片的详细IoU信息请查看: {iou_file_path}")
+    # 保存整体评估结果到文件，结果为英文
+    with open('segmentation_results/val_yolo_outputs/yolov8n_segmentation_metrics.txt', 'w') as f:
+        f.write(f"Precision: {precision:.4f}\n")
+        f.write(f"Recall: {recall:.4f}\n")
+        f.write(f"mAP@0.5: {map50:.4f}\n")
+        f.write(f"mAP@0.5:0.95: {map_all:.4f}\n")
+        f.write(f"Validation Loss: {loss:.4f}\n")
+        f.write(f"Segmentation mAP@0.5: {seg_map50:.4f}\n")
+        f.write(f"Segmentation mAP@0.5:0.95: {seg_map:.4f}\n")
 
 # 训练yolov8n-seg.pt模型
 def train_yolov8n_segmentation(data_yaml_path, epochs=150, imgsz=640):
@@ -382,96 +374,239 @@ def train_yolov8n_segmentation(data_yaml_path, epochs=150, imgsz=640):
         epochs: 训练轮次
         imgsz: 图像尺寸(数据集已经将图像resize到640x640)
     """
-    # 从本地加载yolov8n-seg.pt模型
-    local_model_path = './yolo_model/yolov8n-seg.pt'
+    
+    # 创建验证结果保存目录
+    val_results_dir = './val_segmentation_results'
+    os.makedirs(val_results_dir, exist_ok=True)
+    
+    # 从本地加载yolov8n-seg.pt模型，用中间模型进行训练提高准确性
+    local_model_path = './runs/segment/train3/weights/epoch40.pt'
     model = YOLO(local_model_path)
+
     # 训练模型
     results = model.train(
         data = data_yaml_path,      # 数据配置文件路径
-        epochs = epochs,            # 训练轮次（该数据集规模较小，可以适当增大轮次）
+        epochs = epochs,            # 训练轮次
         task = 'segment',           # 任务类型为分割
         imgsz = imgsz,              # 图像尺寸
         batch = 16,                 # 批处理大小
         device = 'cpu',             # 使用CPU训练
         pretrained = True,          # 从预训练模型开始训练
-        seed = 42,                  # 随机种子，确保可重复性
-        patience = 30,              # 训练轮次无改进时，提前停止训练，避免过拟合
+        seed = 42,                  # 随机种子
+        patience = 30,              # 提前停止
         workers = 4,                # 数据加载线程数
         save = True,                # 保存检查点
         save_period = 10,           # 每10轮保存一次检查点
         val = True,                 # 开启验证集评估
-        # 数据增强配置（当前数据集规模较小，可以适当增大数据增强参数）
+        # 数据增强配置
         augment = True,             # 开启数据增强
-        # 其他增强参数（根据数据集调整）
-        hsv_h = 0.015,              # HSV颜色空间的色调偏移
+        hsv_h = 0.015,              # 色调偏移
         hsv_s = 0.7,                # 饱和度偏移
         hsv_v = 0.4,                # 亮度偏移
-        degrees = 0.0,              # 旋转角度范围
         translate = 0.1,            # 平移范围
         scale = 0.5,                # 缩放范围
-        shear = 0.0,                # 剪切角度范围
-        perspective = 0.0,          # 透视变换范围
         flipud = 0.5,               # 上下翻转概率
         fliplr = 0.5,               # 左右翻转概率
         mosaic = 0.5,               # 马赛克增强概率
         mixup = 0.1,                # mixup增强概率
-        erasing = 0.1,              # 随机擦除概率
     )
     return results, model
 
-def train_yolov8n_segmentation_model():
+# 训练yolov8n.pt模型
+def train_yolov8n_detection(data_yaml_path, epochs=100, imgsz=640):
     """
-    使用yolov8n-seg.pt分割模型进行训练
-    """
-    # 1. 设置路径和参数
-    data_yaml_path = './data/data.yaml'
-    epochs = 50  # 训练轮次
-
-    # 2.验证数据集结构
-    # print("验证数据集结构...")
-    # validate_data_yaml(data_yaml_path)
-    
-    # 3. 预处理标签文件
-    print("预处理标签文件，确保多边形轮廓格式正确...")
-    process_labels_for_segmentation(data_yaml_path)
-
-    # 4.训练模型
-    print("开始训练yolov8n-seg.pt模型...")
-    results, model = train_yolov8n_segmentation(data_yaml_path, epochs=epochs)
-
-    # 5. 评估模型
-    # print("开始评估yolov8n-seg.pt模型...")
-    # evaluate_model(model, data_yaml_path, split='val')
-
-    # 6. 保存模型
-    print("开始保存yolov8n-seg.pt模型...")
-    model.save('yolo_model/yolov8n_segmentation_model.pt')
-    print("模型训练、评估和保存完成!")
-
-# 当前不能识别出灰尘和水渍类别,只能识别出划痕等多边形类别
-def use_model_for_segmentation(image, image_name, imgsz=640):
-    """
-    使用训练好的分割模型对输入图像进行分割
+    训练YOLOv8n灰尘水渍检测模型
     
     参数:
-        image: 输入增强后的图像(格式为numpy.ndarray)
-        image_name: 图像文件名(用于保存分割结果)
-        imgsz: 图像尺寸
-    
-    返回:
-        results: 分割结果对象
+        data_yaml_path: data.yaml文件路径
+        epochs: 训练轮次
+        imgsz: 图像尺寸(数据集已经将图像resize到640x640)
     """
-    # 加载模型
-    model = YOLO('yolo_model/yolov8n-seg.pt')
-    
-    # 执行分割推理
-    results = model(image, task='segment', device='cpu', imgsz=imgsz)
-    
-    # 提取分割结果中的轮廓（未完成）
-    contours = results[0].masks.xy
+    yolo_model_path = './runs/detect/train/weights/epoch10.pt'
+    # 加载预训练的yolov8n.pt模型
+    model = YOLO(yolo_model_path)
+     # 训练模型
+    results = model.train(
+        data = data_yaml_path,      # 数据配置文件路径
+        epochs = epochs,            # 训练轮次
+        task = 'detect',           # 任务类型为检测
+        imgsz = imgsz,              # 图像尺寸
+        batch = 16,                 # 批处理大小
+        device = 'cpu',             # 使用CPU训练
+        pretrained = True,          # 从预训练模型开始训练
+        seed = 42,                  # 随机种子
+        patience = 30,              # 提前停止
+        workers = 4,                # 数据加载线程数
+        save = True,                # 保存检查点
+        save_period = 10,           # 每10轮保存一次检查点
+        val = True,                 # 开启验证集评估
+        # 数据增强配置
+        augment = True,             # 开启数据增强
+        hsv_h = 0.015,              # 色调偏移
+        hsv_s = 0.7,                # 饱和度偏移
+        hsv_v = 0.4,                # 亮度偏移
+        translate = 0.1,            # 平移范围
+        scale = 0.5,                # 缩放范围
+        flipud = 0.5,               # 上下翻转概率
+        fliplr = 0.5,               # 左右翻转概率
+        mosaic = 0.5,               # 马赛克增强概率
+        mixup = 0.1,                # mixup增强概率
+    )
+    return results, model
 
+# 训练检测模型和分割模型
+def train_model():
+    """
+    训练分割模型和检测模型，并在训练前后管理标签文件夹的符号链接
+    """
+    # 1. 设置路径和参数
+    data_yaml_path = './detection_data/data.yaml'
+    # segmentation_epochs = 150  # 分割模型训练轮次
+    detection_epochs = 100     # 检测模型训练轮次
+
+    # 2.1 训练分割模型
+    # print("开始训练yolov8n-seg.pt模型...")
+    # results, model = train_yolov8n_segmentation(data_yaml_path, epochs=segmentation_epochs)
+
+    # 2.2 训练检测模型
+    print("开始训练yolov8n.pt模型...")
+    results, model = train_yolov8n_detection(data_yaml_path, epochs=detection_epochs)
+   
+    # 3. 保存模型
+    print("开始保存yolov8n.pt模型...")
+    model.save('yolo_model/yolov8n_model.pt')
+    print("模型训练、评估和保存完成!")
+
+########################### 机器学习分割模块 ###################################
+def ml_segmentation_detection(image):
+    """
+    使用训练好的YOLOv8n-seg模型对输入图像进行划痕/凹痕的缺陷分割,使用训练好的yolov8n.pt模型进行灰尘/水渍检测
+
+    参数:
+        image: 输入图像(ndarray数组)
         
-        
+    返回:
+        results: 模型推理结果（包含分割掩码和检测框等信息）
+    """
+    # 加载训练好的模型
+    seg_model = YOLO('yolo_model/yolov8n_segmentation_model.pt')
+    det_model = YOLO('yolo_model/yolov8n_model.pt')
+    
+    # 第一阶段：对输入图像进行划痕/凹痕的缺陷分割
+    seg_results = seg_model(image)
+
+    # 第二阶段：对分割结果进行灰尘/水渍检测
+    det_results = det_model(image)
+    
+    # 提取图像的高度和宽度
+    h, w, _ = image.shape
+
+    # 将分割结果转换为掩码
+    seg_mask = gf.masks_from_result(seg_results[0], h, w)
+    # 将检测结果转换为掩码
+    det_mask = gf.masks_from_result_boxes(det_results[0], h, w)
+
+    # 合并分割掩码和检测掩码
+    combined_mask = np.logical_or(seg_mask, det_mask)
+
+    return combined_mask
+
+# 测试验证集的识别效果
+def test_ml_validation_set(task='segmentation', vislist=None):
+    """
+    测试数据验证集的识别效果
+
+    参数:
+        task: 任务类型，'segmentation'或'detection'
+        vislist: 可视化结果列表，用于合并矩形框检测
+    """
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    # 第一阶段：处理划痕与凹痕的缺陷分割
+    data_root = os.path.join(repo_root, task + '_data', 'valid')
+    images_dir = os.path.join(data_root, 'images')
+    labels_dir = os.path.join(data_root, 'labels')
+    
+    out_dir = os.path.join(repo_root, 'segmentation_results', 'val_yolo_outputs', task + '_visualizations')
+    os.makedirs(out_dir, exist_ok=True)
+    iou_csv = os.path.join(repo_root, 'segmentation_results', 'val_yolo_outputs', task + '_ious.csv')
+
+    image_extensions = ('.jpg', '.jpeg', '.png')
+    image_files = sorted(
+        [
+            f
+            for f in os.listdir(images_dir)
+            if f.lower().endswith(image_extensions)
+        ]
+    )
+
+    # 分割任务：使用yolov8n-seg模型进行缺陷分割
+    if task == 'segmentation':
+        model_path = os.path.join(repo_root, 'yolo_model', 'yolov8n_segmentation_model.pt')
+        model = YOLO(model_path)
+    elif task == 'detection':
+        model_path = os.path.join(repo_root, 'yolo_model', 'yolov8n_model.pt')
+        model = YOLO(model_path)
+    
+    vis_temp = []      # 用于存储可视化结果的临时列表，用于后续矩形框检测合并
+
+    with open(iou_csv, 'w', encoding='utf-8') as outf:
+        outf.write('image,iou\n')
+        for i,img_name in enumerate(tqdm(image_files, desc='Images')):
+            img_path = os.path.join(images_dir, img_name)
+            label_name = os.path.splitext(img_name)[0] + '.txt'
+            label_path = os.path.join(labels_dir, label_name)
+
+            img = cv2.imread(img_path)
+            if img is None:
+                print('Could not read', img_path)
+                continue
+            h, w = img.shape[:2]
+
+            # 读取真实掩码
+            if task == 'segmentation':
+                gt_mask = gf.read_label_polygons(label_path, w, h)
+            elif task == 'detection':
+                gt_mask = gf.read_label_bboxes(label_path, w, h)
+
+            # run model prediction for this image
+            try:
+                results = model.predict(img_path, conf=0.25, verbose=False)
+            except Exception as e:
+                print('Model prediction failed for', img_name, e)
+                pred_mask = np.zeros((h, w), dtype=np.uint8)
+            else:
+                if len(results) == 0:
+                    pred_mask = np.zeros((h, w), dtype=np.uint8)
+                else:
+                    if task == 'segmentation':
+                        pred_mask = gf.masks_from_result(results[0], h, w)
+                    elif task == 'detection':
+                        pred_mask = gf.masks_from_result_boxes(results[0], h, w)
+
+            iou = gf.compute_iou(gt_mask, pred_mask)
+            outf.write(f"{img_name},{iou:.6f}\n")
+
+            if vislist is None:
+                vis = gf.draw_contours_on_image(img, pred_mask, gt_mask=gt_mask)
+                out_path = os.path.join(out_dir, img_name)
+                cv2.imwrite(out_path, vis)
+                vis_temp.append(vis.copy())
+            else:
+                vis = gf.draw_contours_on_image(vislist[i], pred_mask, gt_mask=gt_mask)
+                out_path = os.path.join(out_dir, img_name)
+                cv2.imwrite(out_path, vis)
+    
+    if task == 'segmentation':
+        return vis_temp
+    else:
+        return None
+
 if __name__ == '__main__':
-    train_yolov8n_segmentation_model()
-
+    # 第一阶段进行划痕/凹痕的缺陷分割
+    vis_temp = test_ml_validation_set(task='segmentation')
+    # 第二阶段进行灰尘/水渍检测
+    test_ml_validation_set(task='detection', vislist=vis_temp)
+    # 第三阶段划痕/凹痕缺陷分割的整体指标
+    # model = YOLO('yolo_model/yolov8n_segmentation_model.pt')
+    # yaml_path = os.path.join('segmentation_data', 'data.yaml')
+    # evaluate_model(model, yaml_path)

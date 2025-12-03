@@ -329,7 +329,7 @@ def evaluate_image(original, enhanced, filename):
     return results
 
 # 保存处理前后的图像
-def save_image(src, result, image_path):
+def save_image(src, result, image_path,  output_path=None):
     # 创建并排显示的图像
     # 设置缩放比例，缩小图像尺寸
     scale_factor = 0.6  # 可以根据需要调整缩放比例
@@ -445,13 +445,13 @@ def save_image(src, result, image_path):
     
     # 保存合并后的图像到enhance_results文件夹，使用原始图片名称+时间戳命名
     # 确保enhance_results文件夹存在
-    results_dir = 'enhance_results'
+    results_dir = output_path if output_path else 'enhance_results'
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
     
     # 获取原始文件名（不含路径）
     original_filename = os.path.basename(image_path)
-     # 获取文件名（不含扩展名）和扩展名
+    # 获取文件名（不含扩展名）和扩展名
     name_without_ext, ext = os.path.splitext(original_filename)
     
     # 获取当前时间戳
