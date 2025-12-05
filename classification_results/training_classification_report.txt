@@ -1,4 +1,6 @@
 Training DataSet Accuracy: 0.9932
+True labels: [2 2 0 ... 3 3 3]
+Predicted labels: [2 2 0 ... 3 3 3]
 classification_report:
               precision    recall  f1-score   support
 
@@ -10,3 +12,4 @@ classification_report:
     accuracy                           0.99      1032
    macro avg       0.99      0.99      0.99      1032
 weighted avg       0.99      0.99      0.99      1032
+

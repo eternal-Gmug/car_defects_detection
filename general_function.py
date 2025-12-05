@@ -288,3 +288,102 @@ def draw_contours_on_image(image, pred_mask, gt_mask=None):
         )
         cv2.drawContours(out, contours_g, -1, (0, 0, 255), 1)
     return out
+
+# 绘制识别到的缺陷以及类别标签
+def draw_contours_and_labels_on_image(image, mask_list, predicted_labels, position_list):
+    """
+    绘制识别到的缺陷以及类别标签
+    
+    参数:
+    image: 原始RGB图像(ndarray)
+    mask_list: 掩码列表(每个元素为一个缺陷的二值掩码)
+    predicted_labels: 分类标签列表(每行对应一个缺陷类别,与mask_list的索引对应)
+    position_list: 缺陷位置列表(每个元素为(x0, y0, x1, y1),array(float32),与mask_list的索引对应)
+    
+    返回:
+    out: 绘制了缺陷轮廓和标签的图像
+    """
+    out = image.copy()
+    
+    # 定义类别名称映射
+    class_names = {
+        0: "dirt",
+        1: "runs",
+        2: "scratch",
+        3: "water marks"
+    }
+    
+    # 定义类别颜色映射 (使用不同的鲜艳颜色)
+    class_colors = {
+        0: (0, 255, 0),      # 绿色 - dirt
+        1: (255, 0, 0),      # 蓝色 - runs
+        2: (0, 0, 255),      # 红色 - scratch
+        3: (0, 255, 255),    # 青色 - water marks
+        'default': (128, 128, 128)  # 灰色 - 未知类别
+    }
+    
+    # 遍历所有缺陷
+    for i in range(len(mask_list)):
+        mask = mask_list[i]
+        label = predicted_labels[i]
+        position = position_list[i]
+        
+        # 获取类别名称和颜色
+        class_name = class_names.get(label, f"unknown({label})")
+        color = class_colors.get(label, class_colors['default'])
+        
+        # 绘制缺陷轮廓
+        mask_uint8 = (mask * 255).astype(np.uint8)
+        contours, _ = cv2.findContours(
+            mask_uint8,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+        cv2.drawContours(out, contours, -1, color, 2)
+        
+        # 计算标签位置 (使用轮廓的中心点或边界框的合适位置)
+        x0, y0, x1, y1 = position
+        
+        # 如果有轮廓，使用第一个轮廓的中心点作为参考
+        if len(contours) > 0:
+            # 计算第一个轮廓的边界框
+            contour = contours[0]
+            x, y, w, h = cv2.boundingRect(contour)
+            # 使用轮廓边界框的顶部中心作为标签位置
+            label_x = int(x + w / 2)
+            label_y = int(y - 10)  # 标签放在轮廓上方
+        else:
+            # 如果没有轮廓，使用position的中心点
+            label_x = int((x0 + x1) / 2)
+            label_y = int(y0 - 10)
+        
+        # 确保标签在图像范围内
+        text_size = cv2.getTextSize(class_name, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
+        
+        # 调整标签x坐标使其居中
+        label_x -= text_size[0] // 2
+        
+        # 如果标签在图像顶部上方，调整到底部
+        if label_y < text_size[1] + 10:
+            if len(contours) > 0:
+                label_y = int(y + h + 20)  # 放在轮廓下方
+            else:
+                label_y = int(y1 + 20)  # 放在position下方
+        
+        # 确保标签在图像左侧和右侧范围内
+        if label_x < 5:
+            label_x = 5
+        if label_x + text_size[0] > image.shape[1] - 5:
+            label_x = image.shape[1] - text_size[0] - 5
+        
+        # 绘制标签背景
+        cv2.rectangle(out, 
+                     (label_x - 5, label_y - text_size[1] - 5), 
+                     (label_x + text_size[0] + 5, label_y + 5), 
+                     color, -1)
+        
+        # 绘制标签文本
+        cv2.putText(out, class_name, (label_x, label_y - 2), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+    
+    return out

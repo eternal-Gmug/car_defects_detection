@@ -486,30 +486,90 @@ def ml_segmentation_detection(image):
         image: 输入图像(ndarray数组)
         
     返回:
-        results: 模型推理结果（包含分割掩码和检测框等信息）
+        mask_list: 所有检测到的缺陷掩码列表，每个元素是一个二值掩码(ndarray)
+        position_list: 对应掩码的位置信息列表，每个元素是[x1, y1, x2, y2]格式的边界框坐标
     """
     # 加载训练好的模型
     seg_model = YOLO('yolo_model/yolov8n_segmentation_model.pt')
     det_model = YOLO('yolo_model/yolov8n_model.pt')
     
+    mask_list = []
+    position_list = []
+    
     # 第一阶段：对输入图像进行划痕/凹痕的缺陷分割
     seg_results = seg_model(image)
-
+    
+    # 处理分割结果
+    for result in seg_results:
+        if hasattr(result, 'masks') and result.masks is not None:
+            # 获取对应边界框
+            boxes = result.boxes.data.cpu().numpy()  # [x1, y1, x2, y2, confidence, class_id]
+            
+            masks = result.masks
+            h, w = image.shape[:2]
+            
+            # 首先尝试从多边形表示(xy)提取掩码，与general_function.py保持一致
+            try:
+                polys = masks.xy
+                if polys is not None and len(polys) > 0:
+                    for i, poly in enumerate(polys):
+                        mask = np.zeros((h, w), dtype=np.uint8)
+                        pts = np.array(poly, dtype=np.int32)
+                        if pts.shape[0] >= 3:
+                            cv2.fillPoly(mask, [pts], 1)
+                            
+                            # 确保掩码格式一致
+                            mask = (mask > 0).astype(np.uint8)
+                            
+                            mask_list.append(mask)
+                            if i < len(boxes):
+                                position_list.append(boxes[i][:4])
+                    continue  # 如果成功从多边形提取，跳过后续方法
+            except Exception:
+                pass
+            
+            # 如果多边形提取失败，尝试从掩码数据张量(n, h, w)提取
+            try:
+                mask_data = masks.data.cpu().numpy()  # 转换为numpy数组
+                
+                # 遍历每个掩码和对应的边界框
+                for i in range(len(mask_data)):
+                    mask = mask_data[i]  # 单个掩码
+                    
+                    # 将掩码缩放到原始图像尺寸
+                    mask_resized = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+                    
+                    # 转换为与general_function.py中pred_mask一致的格式：uint8类型，值为0或1
+                    mask_resized = (mask_resized > 0).astype(np.uint8)
+                    
+                    mask_list.append(mask_resized)
+                    if i < len(boxes):
+                        position_list.append(boxes[i][:4])
+            except Exception as e:
+                print(f"提取掩码时出错: {e}")
+    
     # 第二阶段：对分割结果进行灰尘/水渍检测
     det_results = det_model(image)
     
-    # 提取图像的高度和宽度
-    h, w, _ = image.shape
-
-    # 将分割结果转换为掩码
-    seg_mask = gf.masks_from_result(seg_results[0], h, w)
-    # 将检测结果转换为掩码
-    det_mask = gf.masks_from_result_boxes(det_results[0], h, w)
-
-    # 合并分割掩码和检测掩码
-    combined_mask = np.logical_or(seg_mask, det_mask)
-
-    return combined_mask
+    # 处理检测结果（没有掩码，需要从边界框生成矩形掩码）
+    for result in det_results:
+        if hasattr(result, 'boxes') and result.boxes is not None:
+            boxes = result.boxes.data.cpu().numpy()  # [x1, y1, x2, y2, confidence, class_id]
+            
+            for box in boxes:
+                x1, y1, x2, y2 = box[:4].astype(int)
+                
+                # 生成矩形掩码
+                h, w = image.shape[:2]
+                mask = np.zeros((h, w), dtype=np.uint8)
+                mask[y1:y2, x1:x2] = 1
+                # 确保掩码格式与分割结果一致
+                mask = (mask > 0).astype(np.uint8)
+                
+                mask_list.append(mask)
+                position_list.append(box[:4])
+    
+    return mask_list, position_list
 
 # 测试验证集的识别效果
 def test_ml_validation_set(task='segmentation', vislist=None):

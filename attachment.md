@@ -47,3 +47,4 @@
     - val/seg_loss: 验证集分割损失
     - val/cls_loss: 验证集分类损失
     - val/dfl_loss: 验证集分布焦点损失
+    

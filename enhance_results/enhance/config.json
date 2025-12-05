@@ -1,0 +1,64 @@
+{
+  "results": {
+    "csv_dir": "results/csv",
+    "images_dir": "results/images",
+    "csv_filename": "processed_comparison.csv"
+  },
+  "results_base": "resolution/enhance/results",
+  "save_image": {
+    "scale_factor": 0.6,
+    "label_original": "ORIGINAL",
+    "label_processed": "PROCESSED"
+  },
+  "save": {
+    "mode": "processed",
+    "compare_default": false,
+    "timestamp_in_name": true,
+    "processed_suffix": "_proc"
+  },
+  "evaluation": {
+    "local_contrast_kernel": 15,
+    "multiscale_scales": [
+      5,
+      15,
+      25
+    ]
+  },
+  "enhance": {
+    "clahe": {
+      "clipLimit": 2.0,
+      "tileGridSize": [
+        16,
+        16
+      ]
+    },
+    "inpaint": {
+      "dilation_kernel": 7,
+      "dilation_iterations": 0,
+      "inpaint_radius": 1,
+      "enable": false
+    },
+    "specular": {
+      "max_thr": 250,
+      "std_factor": 4.0,
+      "specular_ratio_thresh": 0.03
+    },
+    "unsharp": {
+      "denoise_d": 9,
+      "denoise_sigmaColor": 75,
+      "denoise_sigmaSpace": 75,
+      "weight_main": 1.2,
+      "weight_blur": -0.6
+    },
+    "detail_weight": 0.4
+  },
+  "detection": {
+    "contrast_thresh": 0.05,
+    "sharpness_thresh": 50,
+    "uneven_thresh": 0.08
+  },
+  "_tuning": {
+    "last_tuned": "2025-12-04T21:09:14.735710",
+    "best_brisque": 44.727679865345635
+  }
+}

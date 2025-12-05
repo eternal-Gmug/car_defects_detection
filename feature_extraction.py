@@ -899,6 +899,10 @@ def apply_PCA(X, n_components=None):
         X_pca: PCA-transformed test features.
     """
     
+    # 检查输入是否为空
+    if X is None or len(X) == 0:
+        return None
+    
     # 确保输入是2D数组
     if len(X.shape) == 1:
         X = X.reshape(1, -1)
@@ -945,6 +949,14 @@ def train_classifier(X, y, model_path='./extracted/trained_classifier.pkl'):
     """
     print("\n开始训练分类器...")
     
+    # 验证特征矩阵和标签向量的行数一致性
+    if X.shape[0] != y.shape[0]:
+        raise ValueError(f"特征矩阵行数({X.shape[0]})与标签向量行数({y.shape[0]})不一致!")
+    
+    print(f"输入特征矩阵形状: {X.shape}")
+    print(f"输入标签向量形状: {y.shape}")
+    print(f"样本数量: {X.shape[0]}")
+    
     # 使用SVM分类器，参数经过调优
     model = SVC(
         C=1.0,
@@ -957,8 +969,11 @@ def train_classifier(X, y, model_path='./extracted/trained_classifier.pkl'):
     # 训练模型
     model.fit(X, y)
     
-    # 评估模型
+    # 评估模型 - 预测结果与输入特征矩阵行数一致
     y_pred = model.predict(X)
+    print(f"\n预测标签向量形状: {y_pred.shape}")
+    print(f"预测标签向量: {y_pred}")
+    
     accuracy = accuracy_score(y, y_pred)
     
     print(f"\n分类器训练完成")
@@ -970,6 +985,10 @@ def train_classifier(X, y, model_path='./extracted/trained_classifier.pkl'):
     os.makedirs('./classification_results', exist_ok=True)
     with open('./classification_results/classification_report.txt', 'a') as f:
         f.write(f"Training DataSet Accuracy: {accuracy:.4f}\n")
+        # 写入真实标签
+        f.write(f"True labels: {y}\n")
+        # 写入预测标签
+        f.write(f"Predicted labels: {y_pred}\n")
         f.write(f"classification_report:\n")
         f.write(classification_report(y, y_pred))
         f.write("\n")
@@ -1007,6 +1026,8 @@ def predict_with_classifier(feature_vector, true_label=None, model_path='./class
     
     # 进行预测
     predicted_labels = model.predict(feature_vector)
+    print(f"\n预测标签向量形状: {predicted_labels.shape}")
+    print(f"预测标签向量: {predicted_labels}")
     
     # 尝试获取置信度（部分模型支持）
     confidences = []
@@ -1047,10 +1068,17 @@ def predict_with_classifier(feature_vector, true_label=None, model_path='./class
         
         # 将分类报告保存到文件
         os.makedirs('./classification_results', exist_ok=True)
-        with open('./classification_results/prediction_report.txt', 'w') as f:
+        with open('./classification_results/prediction_report.txt', 'a') as f:
             f.write(f"Accuracy: {accuracy:.4f}\n")
+            # 写入真实标签的长度和全部内容
+            f.write(f"True labels length: {len(true_labels)}\t")
+            f.write(f"True labels: {true_labels.tolist()}\n")
+            # 写入预测标签的长度和全部内容
+            f.write(f"Predicted labels length: {len(predicted_labels_for_report)}\t")
+            f.write(f"Predicted labels: {predicted_labels_for_report.tolist()}\n")
             f.write("Classification Report:\n")
             f.write(report)
+            f.write("\n")
         
         print(f"Prediction accuracy: {accuracy:.4f}")
         print("Classification Report:")
@@ -1065,7 +1093,7 @@ if __name__ == '__main__':
     # classification_model, accuracy = train_classifier(X, y)
     # 提取测试集的Gabor特征
     n_components = 89
-    X_test, y_test, valid_image_names_test = extract_gabor_features(task='test', n_components=n_components)
+    X_test, y_test, valid_image_names_test = extract_gabor_features(task='valid', n_components=n_components)
     # 对测试集进行预测
     predicted_labels, confidences = predict_with_classifier(X_test, y_test)
 
